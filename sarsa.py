@@ -32,7 +32,7 @@ env = gym.make('MiniGrid-Empty-8x8-v0', render_mode='human').unwrapped
 
 # Variable for storing the Tabular Value-Function
 Q = {}
-filename = 'qtable.pickle'
+filename = 'sarsa.pickle'
 
 # ---- LOAD Q-TABLE IF IT EXISTS ----
 if (exists(filename)):
@@ -71,7 +71,7 @@ if stateKey not in Q: # prevent KeyError on Unseen States
 
 # Training Variables
 epsilon = 0.99
-epsilon_decay = 0.9999
+epsilon_decay = 0.999995
 epsilon_min = 0.01
 
 alpha = 0.1   # learning rate
@@ -98,33 +98,27 @@ for e in range(episodes):
     stateKey = hash(state.tobytes())
     if stateKey not in Q: # prevent KeyError on Unseen States
         Q[stateKey] = np.zeros(numActions)
-    
+
+    #============================================================================
+    # SARSA Requirements
+    #============================================================================
+    # Select First Action 
+    if random.random() < epsilon:
+        a = random.randint(0, numActions-1)
+    else:
+        a = np.argmax(Q[stateKey])
+   
     # Agent Step Loop
     for s in range(0, maxSteps):
 
         # Agent takes Random Action
         #//a = random.randint(0, numActions)
+        # Extract Step Information
+        obs, reward, done, truncated, info = env.step(a)
 
         #============================================================================
         # Epsilon-Greedy Exploration
         #============================================================================
-        # Perform Epsilon Greedy Action
-        if (random.random() < epsilon):
-            # Explore Environment - Select Random Action
-            a = random.randint(0, numActions-1)
-        else:
-            # Exploit Environment - Select Action for max of Value Function @ Current State
-            a = np.argmax(Q[stateKey])
-
-
-        ''' take action 'a', receive reward 'reward', and observe next state 'obs'
-        'done' boolean variable that indicates if the termination state was reached
-        'truncated' boolean variable indicates if episode ended before reaching termination state
-        'info' information provided by the gym environment '''
-
-        # Extract Step Information
-        obs, reward, done, truncated, info = env.step(a)
-
         # Extract Next State from Observation
         state2 = extractObjInfo(obs)
 
@@ -132,12 +126,25 @@ for e in range(episodes):
         state2Key = hash(state2.tobytes())
         if state2Key not in Q:
             Q[state2Key] = np.zeros(numActions)
+                        
+        # Select Next Action Using Epsilon-Greedy
+        if random.random() < epsilon:
+            a2 = random.randint(0, numActions-1)
+        else:
+            a2 = np.argmax(Q[state2Key])
+
+        ''' take action 'a', receive reward 'reward', and observe next state 'obs'
+        'done' boolean variable that indicates if the termination state was reached
+        'truncated' boolean variable indicates if episode ended before reaching termination state
+        'info' information provided by the gym environment '''
+
+        
 
         #============================================================================
-        # Q - Learning
+        # ---- Q_TABLE UPDATE (Bellman Equation) ----
         #============================================================================
-        # ---- Q-TABLE UPDATE (Bellman Equation) ----
-        Q[stateKey][a] = Q[stateKey][a] + alpha*(reward + gamma*np.max(Q[state2Key]) - Q[stateKey][a])
+        # SARSA Update
+        Q[stateKey][a] = Q[stateKey][a] + alpha*(reward + gamma*Q[state2Key][a2] - Q[stateKey][a])
         
         # Decay Epsilon
         epsilon = max(epsilon_min, epsilon * epsilon_decay)
@@ -147,14 +154,14 @@ for e in range(episodes):
 
         # Goal was Reached
         if (done == True):      
-            print('Episode Finished Successfully:')
+            print('Episode %d Finished Successfully:' % e)
             print('Steps: %d' % s)
             print('Reward: %f' % reward)
             break
 
         # No More Steps Allowed
         if (truncated == True):
-            print('Episode Finished Unsuccessful - Truncated:')
+            print('Episode %d Finished Unsuccessful - Truncated:' % e)
             print('Steps: %d' % s)
             print('Reward: %f' % reward)
             break
@@ -162,6 +169,7 @@ for e in range(episodes):
         # Move to Next State
         state = state2
         stateKey = state2Key
+        a = a2
         count += 1
 
     # Write to Tensorboard

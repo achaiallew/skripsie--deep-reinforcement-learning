@@ -147,21 +147,16 @@ for e in range(episodes):
 
         # Goal was Reached
         if (done == True):      
-            print('Episode Finished Successfully:')
+            print('Episode %d Finished Successfully:' % e)
             print('Steps: %d' % s)
             print('Reward: %f' % reward)
             break
 
         # No More Steps Allowed
         if (truncated == True):
-            print('Episode Finished Unsuccessful - Truncated:')
+            print('Episode %d Finished Unsuccessful - Truncated:' % e)
             print('Steps: %d' % s)
             print('Reward: %f' % reward)
-            break
-
-        # Stop Training if Reward is Constant High
-        if reward > 0.9 and epsilon <= epsilon_min:
-            print('Converged! Stopping early.')
             break
 
         # Move to Next State
