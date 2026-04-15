@@ -1,4 +1,4 @@
-#============================================================================
+ #============================================================================
 # Import Modules
 #============================================================================
 import minigrid
@@ -27,7 +27,7 @@ def extractObjInfo(obs):
 #============================================================================
 
 # Make the Gym Environment
-env = gym.make('MiniGrid-Empty-8x8-v0', render_mode='human').unwrapped
+env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
     # 'human' allows us to see the rendered virtual environment
 
 # Variable for storing the Tabular Value-Function
@@ -46,7 +46,7 @@ else:
 
 # Ranges
 numActions = 3 # first 3 actions
-episodes = 3000
+episodes = 2000
 maxSteps = env.max_steps
 
 # Wrapper - Observation will only contain Grid Information
@@ -70,11 +70,11 @@ if stateKey not in Q: # prevent KeyError on Unseen States
     Q[stateKey] = np.zeros(numActions)
 
 # Training Variables
-epsilon = 0.99
-epsilon_decay = 0.999995
+epsilon = 1.0
+epsilon_decay = 0.9999
 epsilon_min = 0.01
 
-alpha = 0.1   # learning rate
+alpha = 0.2   # learning rate
 gamma = 0.99  # discount factor
 
 # Plotting SetUp
@@ -144,13 +144,19 @@ for e in range(episodes):
         # ---- Q_TABLE UPDATE (Bellman Equation) ----
         #============================================================================
         # SARSA Update
-        Q[stateKey][a] = Q[stateKey][a] + alpha*(reward + gamma*Q[state2Key][a2] - Q[stateKey][a])
+        if done:
+            Q[stateKey][a] = Q[stateKey][a] + alpha * (reward - Q[stateKey][a])
+        else:
+            Q[stateKey][a] = Q[stateKey][a] + alpha * (reward + gamma * Q[state2Key][a2] - Q[stateKey][a])
         
         # Decay Epsilon
         epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
+        # Increment Count Every Step
+        count += 1
+
         # Render the Environment
-        env.render()
+        #env.render()
 
         # Goal was Reached
         if (done == True):      
@@ -170,7 +176,6 @@ for e in range(episodes):
         state = state2
         stateKey = state2Key
         a = a2
-        count += 1
 
     # Write to Tensorboard
     writer.add_scalar("Reward/train", reward, count)

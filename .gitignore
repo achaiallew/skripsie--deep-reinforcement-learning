@@ -33,11 +33,6 @@ logs/
 *.h5
 *.zip
 
-# =========================
-# TensorBoard / training runs
-# =========================
-runs/
-events.out.tfevents.*
 
 # =========================
 # Environment variables

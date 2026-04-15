@@ -27,7 +27,7 @@ def extractObjInfo(obs):
 #============================================================================
 
 # Make the Gym Environment
-env = gym.make('MiniGrid-Empty-8x8-v0', render_mode='human').unwrapped
+env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
     # 'human' allows us to see the rendered virtual environment
 
 # Variable for storing the Tabular Value-Function
@@ -46,7 +46,7 @@ else:
 
 # Ranges
 numActions = 3 # first 3 actions
-episodes = 2000
+episodes = 3000
 maxSteps = env.max_steps
 
 # Wrapper - Observation will only contain Grid Information
@@ -71,7 +71,7 @@ if stateKey not in Q: # prevent KeyError on Unseen States
 
 # Training Variables
 epsilon = 0.99
-epsilon_decay = 0.9999
+epsilon_decay = 0.99995
 epsilon_min = 0.01
 
 alpha = 0.1   # learning rate
@@ -97,7 +97,7 @@ for e in range(episodes):
     # State Hash Value
     stateKey = hash(state.tobytes())
     if stateKey not in Q: # prevent KeyError on Unseen States
-        Q[stateKey] = np.zeros(numActions)
+        Q[stateKey] = np.zeros(numActions)*1.0
    
     # Agent Step Loop
     for s in range(0, maxSteps):
@@ -142,8 +142,11 @@ for e in range(episodes):
         # Decay Epsilon
         epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
+        # Increment Count Every Step
+        count += 1
+
         # Render the Environment
-        env.render()
+        #env.render()
 
         # Goal was Reached
         if (done == True):      
@@ -162,7 +165,6 @@ for e in range(episodes):
         # Move to Next State
         state = state2
         stateKey = state2Key
-        count += 1
 
     # Write to Tensorboard
     writer.add_scalar("Reward/train", reward, count)
