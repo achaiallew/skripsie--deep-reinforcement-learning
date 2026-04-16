@@ -13,6 +13,8 @@ from os.path import exists
 from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter()
 
+import hashlib
+
 #============================================================================
 # Define Functions
 #============================================================================
@@ -21,6 +23,13 @@ def extractObjInfo(obs):
     (rows, cols, x) = obs.shape
     temp = np.reshape(obs, [rows*cols*x, 1], 'F')[0:rows*cols]
     return np.reshape(temp, [rows, cols], 'C')
+
+# Generate a Unique Key for Each State
+def hashState(state):
+    # Convert the Numpy Array to Bytes, then Hash it with MD5
+    stateBytes = state.tobytes()
+    hashValue = int(hashlib.md5(stateBytes).hexdigest(), 16)
+    return hashValue
 
 #============================================================================
 # SetUp the RL Agent
@@ -65,7 +74,7 @@ state = extractObjInfo(obs)
     use it as unique key into the dictionary '''
 
 # State Hash Value
-stateKey = hash(state.tobytes())
+stateKey = hashState(state)
 if stateKey not in Q: # prevent KeyError on Unseen States
     Q[stateKey] = np.zeros(numActions)
 
@@ -78,13 +87,14 @@ alpha = 0.1   # learning rate
 gamma = 0.99  # discount factor
 
 # Plotting SetUp
-count = 0
+steps_done = 0
 
 #============================================================================
 # Main RL Loop  (Max Steps: 256)
 #============================================================================
 # Start Training
 print('Start Training...')
+start_time = time.time()
 
 # Episode Loop
 for e in range(episodes):
@@ -95,7 +105,7 @@ for e in range(episodes):
     state = extractObjInfo(obs)
 
     # State Hash Value
-    stateKey = hash(state.tobytes())
+    stateKey = hashState(state)
     if stateKey not in Q: # prevent KeyError on Unseen States
         Q[stateKey] = np.zeros(numActions)*1.0
    
@@ -129,7 +139,7 @@ for e in range(episodes):
         state2 = extractObjInfo(obs)
 
         # Hash the Next State
-        state2Key = hash(state2.tobytes())
+        state2Key = hashState(state2)
         if state2Key not in Q:
             Q[state2Key] = np.zeros(numActions)
 
@@ -137,13 +147,15 @@ for e in range(episodes):
         # ---- Q-TABLE UPDATE (Bellman Equation) ----
         #============================================================================
         # Q-Learning
-        Q[stateKey][a] = Q[stateKey][a] + alpha*(reward + gamma*np.max(Q[state2Key]) - Q[stateKey][a])
+        error = reward + gamma*np.max(Q[state2Key]) - Q[stateKey][a]
+        loss = error**2
+        Q[stateKey][a] = Q[stateKey][a] + alpha*error
 
         # Decay Epsilon
         epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
         # Increment Count Every Step
-        count += 1
+        steps_done += 1
 
         # Render the Environment
         #env.render()
@@ -167,9 +179,17 @@ for e in range(episodes):
         stateKey = state2Key
 
     # Write to Tensorboard
-    writer.add_scalar("Reward/train", reward, count)
+    if done:
+        writer.add_scalar("Reward/train", reward, steps_done)
+        writer.add_scalar("Loss/train", loss, steps_done)
+        writer.add_scalar("Epsilon/train", epsilon, steps_done)
 
+# Done Training
 print('Done Training...')
+end_time = time.time()
+elapsed = end_time - start_time
+print(f'Training took {elapsed:.2f} seconds ({elapsed/60:.2f} minutes)')
+
 # Flush Remaining Data
 writer.flush()
 writer.close()
