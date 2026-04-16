@@ -166,6 +166,11 @@ for e in range(episodes):
         # Render the Environment
         #env.render()
 
+        # Move to Next State
+        state = state2
+        stateKey = state2Key
+        a = a2
+
         # Goal was Reached
         if (done == True):      
             print('Episode %d Finished Successfully:' % e)
@@ -179,11 +184,6 @@ for e in range(episodes):
             print('Steps: %d' % s)
             print('Reward: %f' % reward)
             break
-
-        # Move to Next State
-        state = state2
-        stateKey = state2Key
-        a = a2
 
     # Write to Tensorboard
     if done:
