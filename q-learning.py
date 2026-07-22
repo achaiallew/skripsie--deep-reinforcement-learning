@@ -125,8 +125,6 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
             loss = error**2
             q_table[stateKey][a] = q_table[stateKey][a] + alpha*error
 
-            # Decay Epsilon
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
             # Increment Count Every Step
             steps_done += 1
@@ -145,13 +143,16 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
             if (done or truncated):      
                 break
 
+        # Decay Epsilon
+        epsilon = max(epsilon_min, epsilon * epsilon_decay)
+
         # Epsiode Rewards
         episode_rewards.append(total_reward)
         
 
         # Write to Tensorboard upon Completion
-        if log_to_tb and writer is not None and done:
-            writer.add_scalar("Reward/train", reward, steps_done)
+        if log_to_tb and writer is not None:
+            writer.add_scalar("Reward/train", total_reward, steps_done)
             writer.add_scalar("Loss/train", loss, steps_done)
             writer.add_scalar("Epsilon/train", epsilon, steps_done)
 
@@ -172,7 +173,6 @@ def objective(trial):
     rewards = []
     # Start Tuning Time
     start_time = time.time()
-    print("Start Hyperparameter Tuning")
 
     for seed in range(3): 
         np.random.seed(seed)
@@ -205,6 +205,7 @@ if __name__ == "__main__":
     existing_q = load_q_table(filename)
 
     # Study the Model
+    print("Start Hyperparameter Tuning")
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials= 50)
 
@@ -247,7 +248,7 @@ if __name__ == "__main__":
     print('Done Training...')
     end_time = time.time()
     elapsed = end_time - start_time
-    print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
 
     # Flush Remaining Data
     writer.flush()
