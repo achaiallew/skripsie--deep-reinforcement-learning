@@ -15,6 +15,9 @@ writer = SummaryWriter()
 
 import hashlib
 
+import optuna
+import numpy as np
+
 #============================================================================
 # Define Functions
 #============================================================================
@@ -31,170 +34,233 @@ def hashState(state):
     hashValue = int(hashlib.md5(stateBytes).hexdigest(), 16)
     return hashValue
 
-#============================================================================
-# SetUp the RL Agent
-#============================================================================
+# ---- LOAD Q-TABLE IF IT EXISTS ----
+def load_q_table(filename):
+    if (exists(filename)):
+        print('Loading Existing Q Values...')
+        # Load Data (Deserialise)
+        with open(filename, 'rb') as handle:
+            return pickle.load(handle)
+            handle.close()
+    else:
+        print('Filename %s DNE: Could Not Load Data' % filename)
+        return {}
 
-# Make the Gym Environment
-env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-    # 'human' allows us to see the rendered virtual environment
+#============================================================================
+# Configuration
+#============================================================================
+# Establish Environment Parameters
+n_actions = 3
+max_steps = gym.make('MiniGrid-Empty-8x8-v0').unwrapped.max_steps
 
 # Variable for storing the Tabular Value-Function
-Q = {}
 filename = 'qtable.pickle'
 
-# ---- LOAD Q-TABLE IF IT EXISTS ----
-if (exists(filename)):
-    print('Loading Existing Q Values...')
-    # Load Data (Deserialise)
-    with open(filename, 'rb') as handle:
-        Q = pickle.load(handle)
-        handle.close()
-else:
-    print('Filename %s DNE: Could Not Load Data' % filename)
-
-# Ranges
-numActions = 3 # first 3 actions
-episodes = 3000
-maxSteps = env.max_steps
-
-# Wrapper - Observation will only contain Grid Information
-env = ImgObsWrapper(env)
-
-# Reset the Environment
-obs, _ = env.reset()
-
-# Extract Current State
-state = extractObjInfo(obs)
-
-'''initialise the initial values of the value-function to be zero 
-    - this is a pessimistic initialisation
-## note that using the numpy array of the observation will not work in practice, 
-    you will need to calculate a hash-value of the current state and 
-    use it as unique key into the dictionary '''
-
-# State Hash Value
-stateKey = hashState(state)
-if stateKey not in Q: # prevent KeyError on Unseen States
-    Q[stateKey] = np.zeros(numActions)
-
-# Training Variables
-epsilon = 0.99
-epsilon_decay = 0.99995
-epsilon_min = 0.01
-
-alpha = 0.1   # learning rate
-gamma = 0.99  # discount factor
-
-# Plotting SetUp
+# SetUp Counter
 steps_done = 0
 
 #============================================================================
-# Main RL Loop  (Max Steps: 256)
+# Q-Table Training Function
 #============================================================================
-# Start Training
-print('Start Training...')
-start_time = time.time()
+def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min, 
+                     episodes = 3000, log_to_tb = False, writer = None, initial_q = None):
+    # Plotting SetUp
+    global steps_done
 
-# Episode Loop
-for e in range(episodes):
-    # Reset the Environment
-    obs, _ = env.reset()
+    # Definte Q Table
+    q_table = dict(initial_q) if initial_q is not None else {}
+    
+    # Define Training Variables
+    epsilon = epsilon_start
+    episode_rewards = []
 
-    # Extract Current State
-    state = extractObjInfo(obs)
+    # Episode Loop
+    for e in range(episodes):
+        # Reset the Environment
+        obs, _ = env.reset()
+        # Set Reward Tracking Variable
+        total_reward = 0
 
-    # State Hash Value
-    stateKey = hashState(state)
-    if stateKey not in Q: # prevent KeyError on Unseen States
-        Q[stateKey] = np.zeros(numActions)*1.0
-   
-    # Agent Step Loop
-    for s in range(0, maxSteps):
+        # Extract Current State
+        state = extractObjInfo(obs)
 
-        # Agent takes Random Action
-        #//a = random.randint(0, numActions)
+        # State Hash Value
+        stateKey = hashState(state)
+        if stateKey not in q_table: # prevent KeyError on Unseen States
+            q_table[stateKey] = np.zeros(n_actions)*1.0
+        
+        # Declare Tracking Variables
+        done = False
+        loss = 0.0
+    
+        # Agent Step Loop
+        for s in range(0, max_steps):
+            #============================================================================
+            # Epsilon-Greedy Exploration
+            #============================================================================
+            # Perform Epsilon Greedy Action
+            if (random.random() < epsilon):
+                # Explore Environment - Select Random Action
+                a = random.randint(0, n_actions-1)
+            else:
+                # Exploit Environment - Select Action for max of Value Function @ Current State
+                a = np.argmax(q_table[stateKey])
 
-        #============================================================================
-        # Epsilon-Greedy Exploration
-        #============================================================================
-        # Perform Epsilon Greedy Action
-        if (random.random() < epsilon):
-            # Explore Environment - Select Random Action
-            a = random.randint(0, numActions-1)
-        else:
-            # Exploit Environment - Select Action for max of Value Function @ Current State
-            a = np.argmax(Q[stateKey])
+            # Extract Step Information
+            obs, reward, done, truncated, info = env.step(a)
+
+            # Extract Next State from Observation
+            state2 = extractObjInfo(obs)
+
+            # Hash the Next State
+            state2Key = hashState(state2)
+            if state2Key not in q_table:
+                q_table[state2Key] = np.zeros(n_actions)
+
+            #============================================================================
+            # ---- Q-TABLE UPDATE (Bellman Equation) ----
+            #============================================================================
+            # Q-Learning
+            error = reward + gamma*np.max(q_table[state2Key]) - q_table[stateKey][a]
+            loss = error**2
+            q_table[stateKey][a] = q_table[stateKey][a] + alpha*error
+
+            # Decay Epsilon
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+
+            # Increment Count Every Step
+            steps_done += 1
+            # Calculate Accumulated Rewards
+            total_reward += reward
+
+            # Render the Environment
+            #env.render()
+
+            # Move to Next State
+            state = state2
+            stateKey = state2Key
+            
+
+            # Goal was/wasn't Reached
+            if (done or truncated):      
+                break
+
+        # Epsiode Rewards
+        episode_rewards.append(total_reward)
+        
+
+        # Write to Tensorboard upon Completion
+        if log_to_tb and writer is not None and done:
+            writer.add_scalar("Reward/train", reward, steps_done)
+            writer.add_scalar("Loss/train", loss, steps_done)
+            writer.add_scalar("Epsilon/train", epsilon, steps_done)
+
+    return np.mean(episode_rewards[-100:]), q_table
+
+#============================================================================
+# Tune Hyperparameters using Optuna
+#============================================================================
+def objective(trial):
+    # Tune Model Hyperparameters
+    alpha = trial.suggest_float("alpha", 0.01, 1.0, log=True)
+    gamma = trial.suggest_float("gamma", 0.8, 0.999)
+    epsilon_start = trial.suggest_float("epsilon_start", 0.5, 1.0)
+    epsilon_decay = trial.suggest_float("epsilon_decay", 0.99, 0.9999)
+    epsilon_min = trial.suggest_float("epsilon_min", 0.01, 0.1)
+
+    # Declare Empty Rewards Array
+    rewards = []
+    # Start Tuning Time
+    start_time = time.time()
+    print("Start Hyperparameter Tuning")
+
+    for seed in range(3): 
+        np.random.seed(seed)
+        random.seed(seed)
+
+        # Make the Gym Environment
+        env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
+        env = ImgObsWrapper(env) 
+
+        # Search the Algorithm
+        mean_reward, _ = train_q_learning(
+            env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min,
+            episodes=800, log_to_tb=False, writer=None, initial_q=None) 
+        
+        rewards.append(mean_reward)
+        env.close()
+
+    
+    elapsed = time.time() - start_time
+    print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+
+    # Return the Average of the Trial Rewards
+    return np.mean(rewards)
 
 
-        ''' take action 'a', receive reward 'reward', and observe next state 'obs'
-        'done' boolean variable that indicates if the termination state was reached
-        'truncated' boolean variable indicates if episode ended before reaching termination state
-        'info' information provided by the gym environment '''
+#============================================================================
+# Run the Study
+if __name__ == "__main__":
+    # Check for Existing Q-Table
+    existing_q = load_q_table(filename)
 
-        # Extract Step Information
-        obs, reward, done, truncated, info = env.step(a)
+    # Study the Model
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials= 50)
 
-        # Extract Next State from Observation
-        state2 = extractObjInfo(obs)
+    # Display the Best Parameters
+    print("Best Params:", study.best_params)
+    print("Best Value:", study.best_value)
 
-        # Hash the Next State
-        state2Key = hashState(state2)
-        if state2Key not in Q:
-            Q[state2Key] = np.zeros(numActions)
+    # SetUp Tensorboard
+    writer = SummaryWriter()
+    # Extract the Best Parameters
+    best = study.best_params
 
-        #============================================================================
-        # ---- Q-TABLE UPDATE (Bellman Equation) ----
-        #============================================================================
-        # Q-Learning
-        error = reward + gamma*np.max(Q[state2Key]) - Q[stateKey][a]
-        loss = error**2
-        Q[stateKey][a] = Q[stateKey][a] + alpha*error
+    # Make the Gym Environment
+    env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
+    env = ImgObsWrapper(env) 
+    
+    # Start Training
+    print('Start Training...')
+    # Start Testing Time
+    start_time = time.time()
 
-        # Decay Epsilon
-        epsilon = max(epsilon_min, epsilon * epsilon_decay)
+    # Train the Model 
+    _, trained_qtable = train_q_learning(
+        env,
+        alpha = best["alpha"],
+        gamma = best["gamma"],
+        epsilon_start = best["epsilon_start"],
+        epsilon_decay = best["epsilon_decay"], 
+        epsilon_min = best["epsilon_min"],
+        episodes = 3000,
+        log_to_tb = True,
+        writer = writer,
+        initial_q=existing_q
+    )
 
-        # Increment Count Every Step
-        steps_done += 1
+    # CLose the Environment
+    env.close()
 
-        # Render the Environment
-        #env.render()
+    # Done Training
+    print('Done Training...')
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
 
-        # Move to Next State
-        state = state2
-        stateKey = state2Key
+    # Flush Remaining Data
+    writer.flush()
+    writer.close()
 
-        # Goal was Reached
-        if (done == True):      
-            print('Episode %d Finished Successfully:' % e)
-            print('Steps: %d' % s)
-            print('Reward: %f' % reward)
-            break
-
-        # No More Steps Allowed
-        if (truncated == True):
-            print('Episode %d Finished Unsuccessful - Truncated:' % e)
-            print('Steps: %d' % s)
-            print('Reward: %f' % reward)
-            break
-
-    # Write to Tensorboard
-    if done:
-        writer.add_scalar("Reward/train", reward, steps_done)
-        writer.add_scalar("Loss/train", loss, steps_done)
-        writer.add_scalar("Epsilon/train", epsilon, steps_done)
-
-# Done Training
-print('Done Training...')
-end_time = time.time()
-elapsed = end_time - start_time
-print(f'Training took {elapsed:.2f} seconds ({elapsed/60:.2f} minutes)')
-
-# Flush Remaining Data
-writer.flush()
-writer.close()
-
-# ---- SAVE Q-TABLE AFTER TRAINING ----
-with open(filename, 'wb') as handle:
-    pickle.dump(Q, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # ---- SAVE Q-TABLE AFTER TRAINING ----
+    with open(filename, 'wb') as handle:
+        pickle.dump(trained_qtable, handle, protocol=pickle.HIGHEST_PROTOCOL)
     handle.close()
+
+
+   
+
+
+
+
