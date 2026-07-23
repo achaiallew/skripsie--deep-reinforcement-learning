@@ -56,16 +56,15 @@ max_steps = gym.make('MiniGrid-Empty-8x8-v0').unwrapped.max_steps
 # Variable for storing the Tabular Value-Function
 filename = 'qtable.pickle'
 
-# SetUp Counter
-steps_done = 0
-
 #============================================================================
 # Q-Table Training Function
 #============================================================================
 def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min, 
                      episodes = 3000, log_to_tb = False, writer = None, initial_q = None):
-    # Plotting SetUp
-    global steps_done
+    # SetUp Counter
+    total_steps = 0
+    min_steps = 1000
+    min_episode = None
 
     # Definte Q Table
     q_table = dict(initial_q) if initial_q is not None else {}
@@ -78,8 +77,6 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
     for e in range(episodes):
         # Reset the Environment
         obs, _ = env.reset()
-        # Set Reward Tracking Variable
-        total_reward = 0
 
         # Extract Current State
         state = extractObjInfo(obs)
@@ -92,6 +89,8 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
         # Declare Tracking Variables
         done = False
         loss = 0.0
+        total_reward = 0
+        episode_steps =0
     
         # Agent Step Loop
         for s in range(0, max_steps):
@@ -122,12 +121,13 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
             #============================================================================
             # Q-Learning
             error = reward + gamma*np.max(q_table[state2Key]) - q_table[stateKey][a]
-            loss = error**2
+            loss += error**2
+            episode_steps += 1
             q_table[stateKey][a] = q_table[stateKey][a] + alpha*error
 
 
             # Increment Count Every Step
-            steps_done += 1
+            total_steps += 1
             # Calculate Accumulated Rewards
             total_reward += reward
 
@@ -148,15 +148,22 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
 
         # Epsiode Rewards
         episode_rewards.append(total_reward)
+
+        # Track the Minimum Steps Taken
+        if (min_steps > episode_steps):
+            min_steps = episode_steps
+            min_episode = e
+            
         
 
         # Write to Tensorboard upon Completion
         if log_to_tb and writer is not None:
-            writer.add_scalar("Reward/train", total_reward, steps_done)
-            writer.add_scalar("Loss/train", loss, steps_done)
-            writer.add_scalar("Epsilon/train", epsilon, steps_done)
+            writer.add_scalar("Reward/train", total_reward, total_steps)
+            writer.add_scalar("Loss/train", loss/episode_steps, total_steps)
+            writer.add_scalar("Epsilon/train", epsilon, total_steps)
+            writer.add_scalar("Steps/train", episode_steps, total_steps)
 
-    return np.mean(episode_rewards[-100:]), q_table
+    return np.mean(episode_rewards[-100:]), q_table, min_steps, min_episode
 
 #============================================================================
 # Tune Hyperparameters using Optuna
@@ -167,7 +174,7 @@ def objective(trial):
     gamma = trial.suggest_float("gamma", 0.8, 0.999)
     epsilon_start = trial.suggest_float("epsilon_start", 0.5, 1.0)
     epsilon_decay = trial.suggest_float("epsilon_decay", 0.99, 0.9999)
-    epsilon_min = trial.suggest_float("epsilon_min", 0.01, 0.1)
+    epsilon_min = trial.suggest_float("epsilon_min", 0.001, 0.1)
 
     # Declare Empty Rewards Array
     rewards = []
@@ -183,7 +190,7 @@ def objective(trial):
         env = ImgObsWrapper(env) 
 
         # Search the Algorithm
-        mean_reward, _ = train_q_learning(
+        mean_reward,_,_,_ = train_q_learning(
             env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min,
             episodes=800, log_to_tb=False, writer=None, initial_q=None) 
         
@@ -228,7 +235,7 @@ if __name__ == "__main__":
     start_time = time.time()
 
     # Train the Model 
-    _, trained_qtable = train_q_learning(
+    _, trained_qtable, final_steps, episode = train_q_learning(
         env,
         alpha = best["alpha"],
         gamma = best["gamma"],
@@ -249,6 +256,7 @@ if __name__ == "__main__":
     end_time = time.time()
     elapsed = end_time - start_time
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    print(f'Final Steps Taken: {final_steps} in Episode {episode}')
 
     # Flush Remaining Data
     writer.flush()
