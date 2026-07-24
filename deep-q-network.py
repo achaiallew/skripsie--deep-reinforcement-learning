@@ -1,49 +1,54 @@
 #============================================================================
 # Import Modules
 #============================================================================
-# Import 'gymnasium' and 'minigrid' for our Environment
+# Imports for Environment
 import gymnasium as gym
 import minigrid
 from minigrid.wrappers import *
 
-# Import 'random' and 'math' to Generate Random Numbers / Epsilon Decay
+# Imports for Generate Random Numbers / Epsilon Decay
 import random
 import math
+# Import for Performance Tracking
+import time
 
-# Import 'numpy' for Various Mathematical, Vector and Matrix Functions
+# Import for Various Mathematical, Vector and Matrix Functions
 import numpy as np
 
 from os.path import exists
 
-# Import 'Pytorch' for Neural Network
+# Import for Hyperparameter Tuning
+import optuna
+
+# Import for Experience Replay Memory
+from collections import namedtuple, deque
+
+# Imports for Neural Network
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+# Imports for Writing toTensorboard
 from torch.utils.tensorboard import SummaryWriter
-# SetUp Tensorboard
 writer = SummaryWriter()
 
-# If GPU is to be Used Otherwise use CPU
+# Check for GPU Availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Import 'namedtuple' and 'deque' for Experience Replay Memory
-from collections import namedtuple, deque
 
 #============================================================================
 # Preprocessing Functions
 #============================================================================
-# Extract the OBJECT_IDX Information as a Matrix using Numpy Slicing and Reshaping
+# Extract Object_Idx Info Using Numpy Slicing and Reshaping
 def extractObjectInformation2(observation):
     (rows, cols, x) = observation.shape
     tmp = np.reshape(observation, [rows*cols*x, 1], 'F')[0:rows*cols]
     return np.reshape(tmp, [rows, cols], 'C')
 
-# Normalise the Input Observation so each element is a scalar value between [0,1]
+# Normalise the Input Observation: [0,1]
 def normalize(observation, max_value):
     return np.array(observation)/max_value
 
-# Flatten the [7,7] Matrix into a [1,49] tensor
+# Flatten the [7,7] Matrix into a [1,49] Tensor
 def flatten(observation):
     return torch.from_numpy(np.array(observation).flatten()).float().unsqueeze(0)
 
@@ -52,14 +57,15 @@ def preprocess(observation):
     return flatten(normalize(extractObjectInformation2(observation), 10.0))
 
 #============================================================================
-# Environment Setup
+# Configuration
 #============================================================================
 # Gym Environment
 env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-max_steps = env.max_steps
-
 # Use Wrapper so the Observation only contains the Grid Information
 env = ImgObsWrapper(env)
+
+# Configure Max Steps
+max_steps = env.max_steps
 
 #============================================================================
 # SetUp the HyperParameters
