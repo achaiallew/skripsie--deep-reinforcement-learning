@@ -30,7 +30,6 @@ import torch.optim as optim
 import torch.nn.functional as F
 # Imports for Writing toTensorboard
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter()
 
 # Check for GPU Availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,13 +58,8 @@ def preprocess(observation):
 #============================================================================
 # Configuration
 #============================================================================
-# Gym Environment
-env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-# Use Wrapper so the Observation only contains the Grid Information
-env = ImgObsWrapper(env)
-
 # Configure Max Steps
-max_steps = env.max_steps
+max_steps = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped.max_steps
 
 #============================================================================
 # SetUp the HyperParameters
@@ -84,7 +78,7 @@ target_update = 20000            # no. steps bet. updating target network
 # ---- Q-LEARNING HYPERPARAMETERS ----
 gamma = 0.90                     # discounting rate
 
-# ---- EXPLORATION PARAMETERS for Epsilon Greedy Strategy ----
+# ---- EXPLORATION HYPERPARAMETERS for Epsilon Greedy Strategy ----
 start_epsilon = 1.0              # exploration probability at start
 stop_epsilon = 0.01              # minimum exploration probability
 decay_rate = 20000               # exponential decay rate for exploration probability
@@ -130,34 +124,6 @@ target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 #============================================================================
-# Optimiser (defined ONCE here)
-#============================================================================
-optimiser = optim.Adam(policy_net.parameters(), lr=alpha)
-
-#============================================================================
-# Experience Replay Memory SetUp
-#============================================================================
-Transition = namedtuple('Transition', ('currentState', 'action', 'nextState', 'reward'))
-
-class ReplayMemory(object):
-
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        '''Save a Transition'''
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
-
-# Instantiate Memory
-memory = ReplayMemory(mem_size)
-
-#============================================================================
 # Epsilon-Greedy Exploration
 #============================================================================
 def select_action(state, greedy=False):
@@ -186,6 +152,34 @@ def select_action(state, greedy=False):
     else:
         # Select Random Action with Equal Probability
         return torch.tensor([[random.randrange(num_actions)]], device=device, dtype=torch.long)
+
+#============================================================================
+# Experience Replay Memory SetUp
+#============================================================================
+Transition = namedtuple('Transition', ('currentState', 'action', 'nextState', 'reward'))
+
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
+
+    def push(self, *args):
+        '''Save a Transition'''
+        self.memory.append(Transition(*args))
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
+
+# Instantiate Memory
+memory = ReplayMemory(mem_size)
+
+#============================================================================
+# Optimiser (defined ONCE here)
+#============================================================================
+optimiser = optim.Adam(policy_net.parameters(), lr=alpha)
 
 #============================================================================
 # Optimise Model
@@ -248,49 +242,26 @@ def optimise_model():
     writer.add_scalar('Loss', loss.item(), steps_done)
     writer.add_scalar('TDError', TDerrors.abs().mean().item(), steps_done)
 
-#============================================================================
-# Pre-fill Replay Memory with Random Experience
-#============================================================================
-def prefill_memory(length):
-    print('Pre-filling replay memory...')
-    obs, _ = env.reset()
-    state = preprocess(obs)
-
-    for i in range(length):
-        # Take a fully random action (no network involved yet)
-        action = torch.tensor([[random.randrange(num_actions)]], device=device, dtype=torch.long)
-        a = action.item()
-
-        obs, reward, done, truncated, info = env.step(a)
-        reward_tensor = torch.tensor([reward], device=device)
-
-        if done or truncated:
-            next_state = None
-        else:
-            next_state = preprocess(obs)
-
-        memory.push(state, action, next_state, reward_tensor)
-
-        if done or truncated:
-            obs, _ = env.reset()
-            state = preprocess(obs)
-        else:
-            state = next_state
-
-    print(f'Replay memory pre-filled with {len(memory)} experiences.')
 
 #============================================================================
-# Main Training Loop
+# Deep Q-Learning Function
 #============================================================================
-print('Start training...')
+def deep_q_learning():
 
-if train:
-    # Warm-start the replay buffer before training begins
-    prefill_memory(pretrain_length)
+    # Declare Tracking Variables
+    min_steps = 1000
+    global steps_done
+    episode_rewards = []
 
+    # Episode Loop
     for e in range(episodes):
+        # Declare Epsiode Tracking Variables
+        episode_steps = 0 
+        episode_reward = 0.0
+
         # Reset the Environment
         obs, _ = env.reset()
+
         # Preprocess the Observation to Obtain State
         state = preprocess(obs)
 
@@ -300,24 +271,29 @@ if train:
             a = action.item()
 
             # Perform the Action in Environment
-            obs, reward, done, truncated, info = env.step(a)
-            reward_tensor = torch.tensor([reward], device=device)
-            steps_done += 1
+            obs, reward, done, truncated, _ = env.step(a)
+            reward = torch.tensor([reward], device=device)
 
-            # Store Transition
+            # Increment Step Counters
+            episode_steps += 1
+            steps_done += 1
+            # Calculate Accumulated Rewards
+            episode_reward += reward
+
+            # Preprocess the Observation to Obtain Next State
             if done or truncated:
                 next_state = None
             else:
                 next_state = preprocess(obs)
 
             # Store Transition in Experience Replay Memory
-            memory.push(state, action, next_state, reward_tensor)
-
-            # Move to Next State
-            state = next_state
+            memory.push(state, action, next_state, reward )
 
             # Train Model
             optimise_model()
+
+            # Move to Next State
+            state = next_state
 
             # Periodically Update Target Network
             if steps_done % target_update == 0:
@@ -326,70 +302,110 @@ if train:
 
             # Log Reward / Episode Length to Tensorboard
             if done or truncated:
-                writer.add_scalar('Reward', reward, e)
-                writer.add_scalar('EpisodeLength', s, e)
                 break
 
         # Periodically Track Episode and Step Progress
-        if e % 100 == 0:
-            print(f'Episode {e}/{episodes} | Steps Done: {steps_done}')
+        #if e % 100 == 0:
+            #print(f'Episode {e}/{episodes} | Steps Done: {steps_done}')
 
-    print('Done training...')
+        # Epsiode Rewards
+        episode_rewards.append(episode_reward)
 
-    # Save the Trained Model
-    torch.save(policy_net, filename)
+        # Track the Minimum Steps Taken
+        if (min_steps > episode_steps):
+            min_steps = episode_steps   
 
-else:
+        # Write to Tensorboard upon Completion
+        if writer is not None:
+            writer.add_scalar('Reward/train', reward, steps_done)
+            writer.add_scalar('Steps/train', s, steps_done)
+
+    return np.mean(episode_rewards[-100:]), min_steps
+
+# #============================================================================
+# # Tune Hyperparameters using Optuna
+# #============================================================================
+# def objective(trial):
+#     # Tune Model Hyperparameters
+#     alpha = trial.suggest_float("alpha", 0.01, 1.0, log=True)
+#     gamma = trial.suggest_float("gamma", 0.8, 0.999)
+#     epsilon_start = trial.suggest_float("epsilon_start", 0.5, 1.0)
+#     epsilon_decay = trial.suggest_float("epsilon_decay", 0.99, 0.9999)
+#     epsilon_min = trial.suggest_float("epsilon_min", 0.001, 0.1)
+
+#     # Declare Empty Rewards Array
+#     rewards = []
+#     # Start Tuning Time
+#     start_time = time.time()
+
+#     for seed in range(3): 
+#         np.random.seed(seed)
+#         random.seed(seed)
+
+#         # Make the Gym Environment
+#         env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
+#         env = ImgObsWrapper(env) 
+
+#         # Search the Algorithm
+#         mean_reward,_ = deep_q_learning(
+#             env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min,
+#             episodes=800, log_to_tb=False, writer=None) 
+        
+#         rewards.append(mean_reward)
+#         env.close()
+
+    
+#     elapsed = time.time() - start_time
+#     print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+
+#     # Return the Average of the Trial Rewards
+#     return np.mean(rewards)
+
+#============================================================================
+# Run the Study
+#============================================================================
+if __name__ == "__main__":
+        
     # Load a Previously Trained Model
     if exists(filename):
         policy_net = torch.load(filename, map_location=device)
         policy_net.eval()
         print(f'Loaded trained model from {filename}')
     else:
-        raise FileNotFoundError(f'No saved model found at {filename}. Set train=True first.')
+        #raise FileNotFoundError(f'No saved model found at {filename}.')
+        print("No Saved Model")
 
-#============================================================================
-# Evaluate Agent Performance
-#============================================================================
-print('Starting Evaluation...')
-eval_counter = 0.0
-total_steps = 0.0
-total_reward = 0.0
+    # Gym Environment
+    env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
+    env = ImgObsWrapper(env)
+        
+    # SetUp Tensorboard
+    writer = SummaryWriter()
 
-for e in range(eval_episodes):
-    # Initialise the Environment and State
-    currentObs, _ = env.reset()
-    currentState = preprocess(currentObs)
+    # Start Training
+    print('Start training...')
+    start_time = time.time()
 
-    # Main RL Loop
-    for i in range(0, max_steps):
-        # Always act greedily during evaluation (no exploration)
-        action = select_action(currentState, greedy=True)
-        a = action.item()
+    # Train the Model
+    _, final_steps = deep_q_learning()
 
-        obs, reward, done, truncated, info = env.step(a)
+    # Close the Environment
+    env.close()
 
-        if done or truncated:
-            nextState = None
-        else:
-            nextState = preprocess(obs)
+    # Done Training
+    print('Done Training...')
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    print(f'Final Steps Taken: {final_steps}')
 
-        if done or truncated:
-            total_reward += reward
-            total_steps += env.unwrapped.step_count
-            if done:
-                print('Finished evaluation episode %d with reward %f, %d steps, reaching goal '
-                      % (e, reward, env.unwrapped.step_count))
-                eval_counter += 1
-            if truncated:
-                print('Failed evaluation episode %d with reward %f, %d steps'
-                      % (e, reward, env.unwrapped.step_count))
-            break
+    # Flush Remaining Data
+    writer.flush()
+    writer.close()
 
-        currentState = nextState
+    # Save the Trained Model
+    torch.save(policy_net, filename)
 
-# Print a Summary of the Evaluation Results
-print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
-      % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
 
-writer.close()
+
+

@@ -26,7 +26,6 @@ from os.path import exists
 
 # Imports for Writing to Tensorboard
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter()
 
 #============================================================================
 # Define Functions
@@ -74,7 +73,6 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
     # SetUp Counter
     total_steps = 0
     min_steps = 1000
-    min_episode = None
 
     # Definte Q Table
     q_table = dict(initial_q) if initial_q is not None else {}
@@ -116,7 +114,7 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
                 a = np.argmax(q_table[stateKey])
 
             # Extract Step Information
-            obs, reward, done, truncated, info = env.step(a)
+            obs, reward, done, truncated, _ = env.step(a)
 
             # Extract Next State from Observation
             state2 = extractObjInfo(obs)
@@ -161,9 +159,7 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
 
         # Track the Minimum Steps Taken
         if (min_steps > episode_steps):
-            min_steps = episode_steps
-            min_episode = e
-            
+            min_steps = episode_steps    
         
 
         # Write to Tensorboard upon Completion
@@ -173,7 +169,7 @@ def train_q_learning(env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_mi
             writer.add_scalar("Epsilon/train", epsilon, total_steps)
             writer.add_scalar("Steps/train", episode_steps, total_steps)
 
-    return np.mean(episode_rewards[-100:]), q_table, min_steps, min_episode
+    return np.mean(episode_rewards[-100:]), q_table, min_steps
 
 #============================================================================
 # Tune Hyperparameters using Optuna
@@ -200,7 +196,7 @@ def objective(trial):
         env = ImgObsWrapper(env) 
 
         # Search the Algorithm
-        mean_reward,_,_,_ = train_q_learning(
+        mean_reward,_,_ = train_q_learning(
             env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min,
             episodes=800, log_to_tb=False, writer=None, initial_q=None) 
         
@@ -242,11 +238,11 @@ if __name__ == "__main__":
     
     # Start Training
     print('Start Training...')
-    # Start Testing Time
+    # Start Training Time
     start_time = time.time()
 
     # Train the Model 
-    _, trained_qtable, final_steps, episode = train_q_learning(
+    _, trained_qtable, final_steps = train_q_learning(
         env,
         alpha = best["alpha"],
         gamma = best["gamma"],
@@ -259,7 +255,7 @@ if __name__ == "__main__":
         initial_q=existing_q
     )
 
-    # CLose the Environment
+    # Close the Environment
     env.close()
 
     # Done Training
@@ -267,7 +263,7 @@ if __name__ == "__main__":
     end_time = time.time()
     elapsed = end_time - start_time
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
-    print(f'Final Steps Taken: {final_steps} in Episode {episode}')
+    print(f'Final Steps Taken: {final_steps}')
 
     # Flush Remaining Data
     writer.flush()
