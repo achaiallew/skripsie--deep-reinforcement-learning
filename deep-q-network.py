@@ -33,6 +33,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # Check for GPU Availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 
 #============================================================================
 # Preprocessing Functions
@@ -69,23 +70,22 @@ num_actions = 3                  # left, right, forward
 input_size = 49                  # size of flattened input state (7x7 matrix of tile IDs)
 steps_done = 0
 
-# ---- TRAINING HYPERPARAMETERS ----
-alpha = 0.0002                   # learning rate
-episodes = 3000                  # total episodes for training (per assignment spec)
-batch_size = 128                 # neural network batch size
-target_update = 20000            # no. steps bet. updating target network
+# # ---- TRAINING HYPERPARAMETERS ----
+# alpha = 0.0002                   # learning rate
+# episodes = 3000                  # total episodes for training (per assignment spec)
+# batch_size = 128                 # neural network batch size
 
-# ---- Q-LEARNING HYPERPARAMETERS ----
-gamma = 0.90                     # discounting rate
+# # ---- Q-LEARNING HYPERPARAMETERS ----
+# gamma = 0.90                     # discounting rate
 
-# ---- EXPLORATION HYPERPARAMETERS for Epsilon Greedy Strategy ----
-start_epsilon = 1.0              # exploration probability at start
-stop_epsilon = 0.01              # minimum exploration probability
-decay_rate = 20000               # exponential decay rate for exploration probability
+# # ---- EXPLORATION HYPERPARAMETERS for Epsilon Greedy Strategy ----
+# start_epsilon = 1.0              # exploration probability at start
+# stop_epsilon = 0.01              # minimum exploration probability
+# decay_rate = 20000               # exponential decay rate for exploration probability
 
 # ---- MEMORY HYPERPARAMETERS ----
-pretrain_length = batch_size     # no. experiences stored in memory on initialisation
-mem_size = 500000                # no. experiences the memory can keep
+target_update = 2000              # no. steps bet. updating target network
+mem_size = 200000                  # no. experiences the memory can keep
 
 # ---- TESTING HYPERPARAMETERS ----
 eval_episodes = 1000              # no. episodes to be used for eval
@@ -112,21 +112,13 @@ class DQN(nn.Module):
         x = self.fc3(x)
         return x
 
-# Instantiate the Policy Network and Target Network
+# Update Hidden Layer Size
 hiddenLayerSize = (128, 128)
-policy_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
-target_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
-
-# Copy Weights of Policy Network to Target Network
-target_net.load_state_dict(policy_net.state_dict())
-
-# Set Target Network to Eval Mode to not Update Parameters
-target_net.eval()
 
 #============================================================================
 # Epsilon-Greedy Exploration
 #============================================================================
-def select_action(state, greedy=False):
+def select_action(state, explore_param, policy_net, greedy=False):
     '''Select an action using epsilon-greedy exploration.
        If greedy=True, always act greedily (used for evaluation).'''
     global steps_done
@@ -134,6 +126,11 @@ def select_action(state, greedy=False):
     if greedy:
         with torch.no_grad():
             return policy_net(state).max(1)[1].unsqueeze(0)
+
+    # Extract Parameters
+    start_epsilon = explore_param[0]
+    stop_epsilon = explore_param[1]
+    decay_rate = explore_param[2]
 
     # Generate a Random Number
     r = random.random()
@@ -177,14 +174,14 @@ class ReplayMemory(object):
 memory = ReplayMemory(mem_size)
 
 #============================================================================
-# Optimiser (defined ONCE here)
-#============================================================================
-optimiser = optim.Adam(policy_net.parameters(), lr=alpha)
-
-#============================================================================
 # Optimise Model
 #============================================================================
-def optimise_model():
+def optimise_model(train_param, writer, optimiser, policy_net, target_net):
+
+    # Extract Parameters
+    #alpha = train_param[0]
+    gamma = train_param[1]
+    batch_size = train_param[2]
 
     # Check if Replay memory has Stored Enough Experience
     if len(memory) < batch_size:
@@ -239,14 +236,15 @@ def optimise_model():
     optimiser.step()
 
     # Log Loss to Tensorboard
-    writer.add_scalar('Loss', loss.item(), steps_done)
-    writer.add_scalar('TDError', TDerrors.abs().mean().item(), steps_done)
+    if writer is not None:
+        writer.add_scalar('Loss', loss.item(), steps_done)
+        writer.add_scalar('TDError', TDerrors.abs().mean().item(), steps_done)
 
 
 #============================================================================
 # Deep Q-Learning Function
 #============================================================================
-def deep_q_learning():
+def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, target_net, episodes=800, writer=None):
 
     # Declare Tracking Variables
     min_steps = 1000
@@ -267,7 +265,7 @@ def deep_q_learning():
 
         for s in range(0, max_steps):
             # Perform Epsilon-Greedy Action Selection
-            action = select_action(state)
+            action = select_action(state, explore_param, policy_net)
             a = action.item()
 
             # Perform the Action in Environment
@@ -290,7 +288,8 @@ def deep_q_learning():
             memory.push(state, action, next_state, reward )
 
             # Train Model
-            optimise_model()
+            if steps_done % 4 == 0:
+                optimise_model(train_param, writer, optimiser, policy_net, target_net)
 
             # Move to Next State
             state = next_state
@@ -322,44 +321,68 @@ def deep_q_learning():
 
     return np.mean(episode_rewards[-100:]), min_steps
 
-# #============================================================================
-# # Tune Hyperparameters using Optuna
-# #============================================================================
-# def objective(trial):
-#     # Tune Model Hyperparameters
-#     alpha = trial.suggest_float("alpha", 0.01, 1.0, log=True)
-#     gamma = trial.suggest_float("gamma", 0.8, 0.999)
-#     epsilon_start = trial.suggest_float("epsilon_start", 0.5, 1.0)
-#     epsilon_decay = trial.suggest_float("epsilon_decay", 0.99, 0.9999)
-#     epsilon_min = trial.suggest_float("epsilon_min", 0.001, 0.1)
+#============================================================================
+# Tune Hyperparameters using Optuna
+#============================================================================
+def objective(trial):
+    # Tune Model Hyperparameters
+    alpha = trial.suggest_float("alpha", 0.01, 1.0, log=True)
+    gamma = trial.suggest_float("gamma", 0.8, 0.999)
+    batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
+    start_epsilon = trial.suggest_float("start_epsilon", 0.9, 1.0)
+    decay_rate = trial.suggest_float("decay_rate", 10000, 25000)
+    stop_epsilon = trial.suggest_float("stop_epsilon", 0.001, 0.02)
 
-#     # Declare Empty Rewards Array
-#     rewards = []
-#     # Start Tuning Time
-#     start_time = time.time()
+    # Group Parameters
+    train_param = [alpha, gamma, batch_size]
+    explore_param = [start_epsilon, stop_epsilon, decay_rate]
 
-#     for seed in range(3): 
-#         np.random.seed(seed)
-#         random.seed(seed)
+    # Declare Empty Rewards Array
+    rewards = []
+    # Start Tuning Time
+    start_time = time.time()
 
-#         # Make the Gym Environment
-#         env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-#         env = ImgObsWrapper(env) 
+    global steps_done
 
-#         # Search the Algorithm
-#         mean_reward,_ = deep_q_learning(
-#             env, alpha, gamma, epsilon_start, epsilon_decay, epsilon_min,
-#             episodes=800, log_to_tb=False, writer=None) 
+    for seed in range(2): 
+        # Reset Steps Done
+        steps_done = 0 
+
+        np.random.seed(seed)
+        random.seed(seed)
+
+        # ---- RESET FRESH NETWORKS PER SEED ----
+        # Instantiate the Policy Network and Target Network
+        policy_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
+        target_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
+        # Copy Weights of Policy Network to Target Network
+        target_net.load_state_dict(policy_net.state_dict())
+        # Set Target Network to Eval Mode to not Update Parameters
+        target_net.eval()
+        # Adam Optimiser
+        optimiser = optim.Adam(policy_net.parameters(), lr=alpha)
+
+        # Make the Gym Environment
+        env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
+        env = ImgObsWrapper(env) 
+
+        # Search the Algorithm
+        mean_reward,_ = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
+                                        target_net, episodes=200, writer=None) 
         
-#         rewards.append(mean_reward)
-#         env.close()
+        rewards.append(mean_reward)
+
+        trial.report(np.mean(rewards), seed)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+        env.close()
 
     
-#     elapsed = time.time() - start_time
-#     print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    elapsed = time.time() - start_time
+    print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
 
-#     # Return the Average of the Trial Rewards
-#     return np.mean(rewards)
+    # Return the Average of the Trial Rewards
+    return np.mean(rewards)
 
 #============================================================================
 # Run the Study
@@ -375,6 +398,34 @@ if __name__ == "__main__":
         #raise FileNotFoundError(f'No saved model found at {filename}.')
         print("No Saved Model")
 
+    # Study the Model
+    print("Start Hyperparameter Tuning...")
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    study.optimize(objective, n_trials= 30)
+    
+    # Display the Best Parameters
+    print("Best Params:", study.best_params)
+    print("Best Value:", study.best_value)
+
+    # Extract the Best Parameters
+    best = study.best_params
+
+    # Log Best Parameters
+    train_param = [best["alpha"], best["gamma"], best["batch_size"]]
+    decay_rate = best["decay_rate"] * (3000 / 200)  
+    explore_param = [best["start_epsilon"], best["stop_epsilon"], decay_rate]
+
+    # ---- RESET NETWORKS FOR FINAL TRAINING ----
+    # Instantiate the Policy Network and Target Network
+    policy_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
+    target_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
+    # Copy Weights of Policy Network to Target Network
+    target_net.load_state_dict(policy_net.state_dict())
+    # Set Target Network to Eval Mode to not Update Parameters
+    target_net.eval()
+    # Adam Optimiser
+    optimiser = optim.Adam(policy_net.parameters(), lr=best["alpha"])
+
     # Gym Environment
     env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
     env = ImgObsWrapper(env)
@@ -386,8 +437,11 @@ if __name__ == "__main__":
     print('Start training...')
     start_time = time.time()
 
+    steps_done = 0
+
     # Train the Model
-    _, final_steps = deep_q_learning()
+    _, final_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
+                                     target_net, episodes=3000, writer=writer)
 
     # Close the Environment
     env.close()
@@ -398,6 +452,52 @@ if __name__ == "__main__":
     elapsed = end_time - start_time
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
     print(f'Final Steps Taken: {final_steps}')
+
+    #============================================================================
+    # Evaluate Agent Performance
+    #============================================================================
+    print('Starting Evaluation...')
+    eval_counter = 0.0
+    total_steps = 0.0
+    total_reward = 0.0
+
+    for e in range(eval_episodes):
+        currentObs, _ = env.reset()
+        currentState = preprocess(currentObs)
+
+        for i in range(0, max_steps):
+            action = select_action(currentState, explore_param, policy_net, greedy=True)
+            a = action.item()
+
+            obs, reward, done, truncated, info = env.step(a)
+
+            if done or truncated:
+                nextState = None
+            else:
+                nextState = preprocess(obs)
+
+            if done or truncated:
+                total_reward += reward
+                total_steps += env.unwrapped.step_count
+                if done:
+                    print('Finished evaluation episode %d with reward %f, %d steps, reaching goal'
+                        % (e, reward, env.unwrapped.step_count))
+                    eval_counter += 1
+                if truncated:
+                    print('Failed evaluation episode %d with reward %f, %d steps'
+                        % (e, reward, env.unwrapped.step_count))
+                    if e < 3:
+                        print(f'  Actions taken: {actions_taken[:30]}')
+                break
+
+            currentState = nextState
+
+    print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
+        % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
+
+    writer.add_scalar('Eval/CompletionRate', eval_counter/eval_episodes, steps_done)
+    writer.add_scalar('Eval/AvgSteps', total_steps/eval_episodes, steps_done)
+    writer.add_scalar('Eval/AvgReward', total_reward/eval_episodes, steps_done)
 
     # Flush Remaining Data
     writer.flush()
