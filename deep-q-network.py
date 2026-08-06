@@ -461,21 +461,30 @@ if __name__ == "__main__":
     total_steps = 0.0
     total_reward = 0.0
 
-    for e in range(eval_episodes):
-        currentObs, _ = env.reset()
-        currentState = preprocess(currentObs)
+    steps_done = 1000000
+    stop_epsilon = 0.0
 
+    for e in range(eval_episodes):
+        # Initialize the Environment and State
+        current_obs, _ = env.reset()
+        current_state = preprocess(current_obs)
+
+        # Main RL Loop
         for i in range(0, max_steps):
-            action = select_action(currentState, explore_param, policy_net, greedy=True)
+            # Select an Action
+            action = select_action(current_state, explore_param, policy_net)
             a = action.item()
 
+            # Take Action
             obs, reward, done, truncated, info = env.step(a)
 
+            # Observe a New State
             if done or truncated:
-                nextState = None
+                next_state = None
             else:
-                nextState = preprocess(obs)
+                next_state = preprocess(obs)
 
+            # Calculate Reward
             if done or truncated:
                 total_reward += reward
                 total_steps += env.unwrapped.step_count
@@ -486,11 +495,10 @@ if __name__ == "__main__":
                 if truncated:
                     print('Failed evaluation episode %d with reward %f, %d steps'
                         % (e, reward, env.unwrapped.step_count))
-                    if e < 3:
-                        print(f'  Actions taken: {actions_taken[:30]}')
                 break
 
-            currentState = nextState
+            # Move to the Next State
+            currentState = next_state
 
     print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
         % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
