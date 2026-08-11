@@ -125,8 +125,18 @@ def select_action(state, explore_param, policy_net, greedy=False):
 
     if greedy:
         with torch.no_grad():
-            return policy_net(state).max(1)[1].unsqueeze(0)
+            print("State:")
+            print(state)
 
+            q_values = policy_net(state)
+            print("Q-values:")
+            print(q_values)
+
+            action = q_values.max(1)[1].unsqueeze(0)
+            print("Chosen action:", action)
+
+            return action
+   
     # Extract Parameters
     start_epsilon = explore_param[0]
     stop_epsilon = explore_param[1]
@@ -259,6 +269,8 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         # Reset the Environment
         obs, _ = env.reset()
+        print(obs.shape)
+        print(obs)
 
         # Preprocess the Observation to Obtain State
         state = preprocess(obs)
@@ -270,6 +282,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
             # Perform the Action in Environment
             obs, reward, done, truncated, _ = env.step(a)
+
             reward = torch.tensor([reward], device=device)
 
             # Increment Step Counters
@@ -384,20 +397,65 @@ def objective(trial):
     # Return the Average of the Trial Rewards
     return np.mean(rewards)
 
+
+#============================================================================
+# Evaluate Agent Performance
+#============================================================================
+def eval_model():
+    eval_counter = 0.0
+    total_steps = 0.0
+    total_reward = 0.0
+
+    steps_done = 1000000
+    stop_epsilon = 0.0
+
+    for e in range(eval_episodes):
+        # Initialize the Environment and State
+        current_obs, _ = env.reset()
+        current_state = preprocess(current_obs)
+
+        # Main RL Loop
+        for i in range(0, max_steps):
+            # Select an Action
+            action = select_action(current_state, explore_param, policy_net, greedy= True)
+            a = action.item()
+            print("Action:", a)
+
+            # Take Action
+            obs, reward, done, truncated, info = env.step(a)
+
+            # Observe a New State
+            if done or truncated:
+                next_state = None
+            else:
+                next_state = preprocess(obs)
+
+            # Calculate Reward
+            if done or truncated:
+                total_reward += reward
+                total_steps += env.unwrapped.step_count
+                if done:
+                    print('Finished evaluation episode %d with reward %f, %d steps, reaching goal'
+                        % (e, reward, env.unwrapped.step_count))
+                    eval_counter += 1
+                if truncated:
+                    print('Failed evaluation episode %d with reward %f, %d steps'
+                        % (e, reward, env.unwrapped.step_count))
+                break
+
+            # Move to the Next State
+            current_state = next_state
+
+    print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
+        % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
+
+
+
 #============================================================================
 # Run the Study
 #============================================================================
 if __name__ == "__main__":
         
-    # Load a Previously Trained Model
-    if exists(filename):
-        policy_net = torch.load(filename, map_location=device)
-        policy_net.eval()
-        print(f'Loaded trained model from {filename}')
-    else:
-        #raise FileNotFoundError(f'No saved model found at {filename}.')
-        print("No Saved Model")
-
     # Study the Model
     print("Start Hyperparameter Tuning...")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
@@ -453,67 +511,29 @@ if __name__ == "__main__":
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
     print(f'Final Steps Taken: {final_steps}')
 
-    #============================================================================
-    # Evaluate Agent Performance
-    #============================================================================
-    print('Starting Evaluation...')
-    eval_counter = 0.0
-    total_steps = 0.0
-    total_reward = 0.0
-
-    steps_done = 1000000
-    stop_epsilon = 0.0
-
-    for e in range(eval_episodes):
-        # Initialize the Environment and State
-        current_obs, _ = env.reset()
-        current_state = preprocess(current_obs)
-
-        # Main RL Loop
-        for i in range(0, max_steps):
-            # Select an Action
-            action = select_action(current_state, explore_param, policy_net)
-            a = action.item()
-
-            # Take Action
-            obs, reward, done, truncated, info = env.step(a)
-
-            # Observe a New State
-            if done or truncated:
-                next_state = None
-            else:
-                next_state = preprocess(obs)
-
-            # Calculate Reward
-            if done or truncated:
-                total_reward += reward
-                total_steps += env.unwrapped.step_count
-                if done:
-                    print('Finished evaluation episode %d with reward %f, %d steps, reaching goal'
-                        % (e, reward, env.unwrapped.step_count))
-                    eval_counter += 1
-                if truncated:
-                    print('Failed evaluation episode %d with reward %f, %d steps'
-                        % (e, reward, env.unwrapped.step_count))
-                break
-
-            # Move to the Next State
-            currentState = next_state
-
-    print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
-        % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
-
-    writer.add_scalar('Eval/CompletionRate', eval_counter/eval_episodes, steps_done)
-    writer.add_scalar('Eval/AvgSteps', total_steps/eval_episodes, steps_done)
-    writer.add_scalar('Eval/AvgReward', total_reward/eval_episodes, steps_done)
-
+    
     # Flush Remaining Data
     writer.flush()
     writer.close()
+    print(policy_net.fc1.weight)
+    print(policy_net.fc2.weight)
+    print(policy_net.fc3.weight)
 
     # Save the Trained Model
     torch.save(policy_net, filename)
 
+    
+    # Reload the Newly Trained Model
+    if exists(filename):
+        policy_net = torch.load(filename, map_location=device, weights_only=False)
+        policy_net.eval()
+        print(f'Loaded trained model from {filename}')
+    else:
+        raise FileNotFoundError(f'No saved model found at {filename}.')
+
+    # Evaluate Model Performance
+    print('Starting Evaluation...')
+    eval_model()
 
 
 
