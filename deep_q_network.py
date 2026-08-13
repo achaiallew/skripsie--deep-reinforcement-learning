@@ -54,7 +54,8 @@ def flatten(observation):
 
 # Combine Preprocessing Functions
 def preprocess(observation):
-    return flatten(normalize(extractObjectInformation2(observation), 10.0))
+    objects = extractObjectInformation2(observation)
+    return flatten(normalize(objects, 10.0))
 
 #============================================================================
 # Configuration
@@ -90,7 +91,7 @@ mem_size = 200000                  # no. experiences the memory can keep
 # ---- TESTING HYPERPARAMETERS ----
 eval_episodes = 1000              # no. episodes to be used for eval
 train = True                      # True to train a model; False to eval prev trained agent
-filename = 'dqn_trained.pth'
+filename = 'dqn_trained.pt'
 
 #============================================================================
 # Define and Create a Neural Network Model
@@ -118,23 +119,15 @@ hiddenLayerSize = (128, 128)
 #============================================================================
 # Epsilon-Greedy Exploration
 #============================================================================
-def select_action(state, explore_param, policy_net, greedy=False):
+def select_action(state, explore_param, policy_net, writer, greedy=False):
     '''Select an action using epsilon-greedy exploration.
        If greedy=True, always act greedily (used for evaluation).'''
     global steps_done
 
     if greedy:
         with torch.no_grad():
-            print("State:")
-            print(state)
-
             q_values = policy_net(state)
-            print("Q-values:")
-            print(q_values)
-
             action = q_values.max(1)[1].unsqueeze(0)
-            print("Chosen action:", action)
-
             return action
    
     # Extract Parameters
@@ -147,6 +140,8 @@ def select_action(state, explore_param, policy_net, greedy=False):
 
     # Calculate the Epsilon Threshold
     epsilon_thres = stop_epsilon + (start_epsilon - stop_epsilon) * math.exp(-1. * steps_done / decay_rate)
+    if writer is not None:
+        writer.add_scalar('Epsilon', epsilon_thres, steps_done)
 
     # Compare Random Number to Epsilon Threshold
     if r > epsilon_thres:
@@ -222,8 +217,13 @@ def optimise_model(train_param, writer, optimiser, policy_net, target_net):
     nf_mask = torch.tensor(tuple(map(lambda s: s is not None, batch.nextState)),
                             device=device, dtype=torch.bool)
 
-    # Calculate the Estimated 'next_state' values for Non-Final States
-    next_state_values[nf_mask] = target_net(nf_next_states).max(1)[0].detach()
+    with torch.no_grad():
+        # ---- DOUBLE DQN ----
+        # Use POLICY network to select the best next action
+        best_next_actions = policy_net(nf_next_states).max(1)[1].unsqueeze(1)
+
+        # Use TARGET network only to evaluate that action's Q-value
+        next_state_values[nf_mask] = target_net(nf_next_states).gather(1, best_next_actions).squeeze(1)
 
     # Compute the Expected Q-Values (TD-Target)
     TDtargets = (next_state_values * gamma) + reward_batch
@@ -275,7 +275,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         for s in range(0, max_steps):
             # Perform Epsilon-Greedy Action Selection
-            action = select_action(state, explore_param, policy_net)
+            action = select_action(state, explore_param, policy_net, writer)
             a = action.item()
 
             # Perform the Action in Environment
@@ -337,12 +337,12 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 #============================================================================
 def objective(trial):
     # Tune Model Hyperparameters
-    alpha = trial.suggest_float("alpha", 0.01, 1.0, log=True)
-    gamma = trial.suggest_float("gamma", 0.8, 0.999)
-    batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
-    start_epsilon = trial.suggest_float("start_epsilon", 0.9, 1.0)
-    decay_rate = trial.suggest_float("decay_rate", 10000, 25000)
-    stop_epsilon = trial.suggest_float("stop_epsilon", 0.001, 0.02)
+    alpha = trial.suggest_float("alpha", 0.003, 1.0, log=True)
+    gamma = trial.suggest_float("gamma", 0.8, 0.99)
+    batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+    start_epsilon = trial.suggest_float("start_epsilon", 0.5, 1.0)
+    decay_rate = trial.suggest_float("decay_rate", 1000, 3000)
+    stop_epsilon = trial.suggest_float("stop_epsilon", 0.01, 0.05)
 
     # Group Parameters
     train_param = [alpha, gamma, batch_size]
@@ -379,7 +379,7 @@ def objective(trial):
 
         # Search the Algorithm
         mean_reward,_ = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
-                                        target_net, episodes=200, writer=None) 
+                                        target_net, episodes=500, writer=None) 
         
         rewards.append(mean_reward)
 
@@ -399,7 +399,7 @@ def objective(trial):
 #============================================================================
 # Evaluate Agent Performance
 #============================================================================
-def eval_model(final_policy_net):
+def eval_model(env, final_policy_net):
     eval_counter = 0.0
     total_steps = 0.0
     total_reward = 0.0
@@ -408,28 +408,21 @@ def eval_model(final_policy_net):
         # Initialize the Environment and State
         current_obs, _ = env.reset()
         current_state = preprocess(current_obs)
-        print(current_obs)
-        print(current_state)
 
         # Main RL Loop
         for i in range(0, max_steps):
             # Select an Action
-            action = select_action(current_state, _, final_policy_net, greedy=True)
+            action = select_action(current_state, _, final_policy_net, writer= None, greedy=True)
             a = action.item()
-            print("Action:", a)
 
             # Take Action
-            obs, reward, done, truncated, info = env.step(a)
-            print("Raw obs equal:", np.array_equal(current_obs, obs))
-            print("Agent pos:", env.unwrapped.agent_pos)
-            print("Agent dir:", env.unwrapped.agent_dir)
+            next_obs, reward, done, truncated, info = env.step(a)
 
             # Observe a New State
             if done or truncated:
                 next_state = None
             else:
-                next_state = preprocess(obs)
-                print("Compare Current/Next State:", torch.equal(current_state, next_state))
+                next_state = preprocess(next_obs)
 
             # Calculate Reward
             if done or truncated:
@@ -460,7 +453,7 @@ if __name__ == "__main__":
     # Study the Model
     print("Start Hyperparameter Tuning...")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
-    study.optimize(objective, n_trials= 30)
+    study.optimize(objective, n_trials= 100)
     
     # Display the Best Parameters
     print("Best Params:", study.best_params)
@@ -471,7 +464,7 @@ if __name__ == "__main__":
 
     # Log Best Parameters
     train_param = [best["alpha"], best["gamma"], best["batch_size"]]
-    decay_rate = best["decay_rate"] * (3000 / 200)  
+    decay_rate = best["decay_rate"] * (3000 / 500)  
     explore_param = [best["start_epsilon"], best["stop_epsilon"], decay_rate]
 
     # ---- RESET NETWORKS FOR FINAL TRAINING ----
@@ -499,7 +492,7 @@ if __name__ == "__main__":
     steps_done = 0
 
     # Train the Model
-    _, final_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
+    total_reward, final_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
                                      target_net, episodes=3000, writer=writer)
 
     # Done Training
@@ -508,29 +501,29 @@ if __name__ == "__main__":
     elapsed = end_time - start_time
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
     print(f'Final Steps Taken: {final_steps}')
+    print(f'Final Reward: {total_reward}')
 
     
     # Flush Remaining Data
     writer.flush()
     writer.close()
-    print(policy_net.fc1.weight)
-    print(policy_net.fc2.weight)
-    print(policy_net.fc3.weight)
+
 
     # Save the Trained Model
-    torch.save(policy_net, filename)
+    torch.save(policy_net.state_dict(), filename)
     
     # Reload the Newly Trained Model
     if exists(filename):
-        final_policy_net = torch.load(filename, map_location=device, weights_only=False)
-        final_policy_net.eval()
+        final_policy_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
+        final_policy_net.load_state_dict(torch.load(filename, map_location=device))
         print(f'Loaded trained model from {filename}')
     else:
         raise FileNotFoundError(f'No saved model found at {filename}.')
 
     # Evaluate Model Performance
     print('Starting Evaluation...')
-    eval_model(final_policy_net)
+    final_policy_net.eval()
+    eval_model(env, final_policy_net)
 
     # Close the Environment
     env.close()
