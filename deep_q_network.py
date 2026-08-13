@@ -269,8 +269,6 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         # Reset the Environment
         obs, _ = env.reset()
-        print(obs.shape)
-        print(obs)
 
         # Preprocess the Observation to Obtain State
         state = preprocess(obs)
@@ -401,34 +399,37 @@ def objective(trial):
 #============================================================================
 # Evaluate Agent Performance
 #============================================================================
-def eval_model():
+def eval_model(final_policy_net):
     eval_counter = 0.0
     total_steps = 0.0
     total_reward = 0.0
-
-    steps_done = 1000000
-    stop_epsilon = 0.0
 
     for e in range(eval_episodes):
         # Initialize the Environment and State
         current_obs, _ = env.reset()
         current_state = preprocess(current_obs)
+        print(current_obs)
+        print(current_state)
 
         # Main RL Loop
         for i in range(0, max_steps):
             # Select an Action
-            action = select_action(current_state, explore_param, policy_net, greedy= True)
+            action = select_action(current_state, _, final_policy_net, greedy=True)
             a = action.item()
             print("Action:", a)
 
             # Take Action
             obs, reward, done, truncated, info = env.step(a)
+            print("Raw obs equal:", np.array_equal(current_obs, obs))
+            print("Agent pos:", env.unwrapped.agent_pos)
+            print("Agent dir:", env.unwrapped.agent_dir)
 
             # Observe a New State
             if done or truncated:
                 next_state = None
             else:
                 next_state = preprocess(obs)
+                print("Compare Current/Next State:", torch.equal(current_state, next_state))
 
             # Calculate Reward
             if done or truncated:
@@ -501,9 +502,6 @@ if __name__ == "__main__":
     _, final_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
                                      target_net, episodes=3000, writer=writer)
 
-    # Close the Environment
-    env.close()
-
     # Done Training
     print('Done Training...')
     end_time = time.time()
@@ -521,19 +519,21 @@ if __name__ == "__main__":
 
     # Save the Trained Model
     torch.save(policy_net, filename)
-
     
     # Reload the Newly Trained Model
     if exists(filename):
-        policy_net = torch.load(filename, map_location=device, weights_only=False)
-        policy_net.eval()
+        final_policy_net = torch.load(filename, map_location=device, weights_only=False)
+        final_policy_net.eval()
         print(f'Loaded trained model from {filename}')
     else:
         raise FileNotFoundError(f'No saved model found at {filename}.')
 
     # Evaluate Model Performance
     print('Starting Evaluation...')
-    eval_model()
+    eval_model(final_policy_net)
+
+    # Close the Environment
+    env.close()
 
 
 
