@@ -89,9 +89,9 @@ target_update = 2000              # no. steps bet. updating target network
 mem_size = 200000                  # no. experiences the memory can keep
 
 # ---- TESTING HYPERPARAMETERS ----
-eval_episodes = 1000              # no. episodes to be used for eval
+eval_episodes = 100              # no. episodes to be used for eval
 train = True                      # True to train a model; False to eval prev trained agent
-filename = 'dqn_trained.pt'
+filename = 'dqn_trained.pth'
 
 #============================================================================
 # Define and Create a Neural Network Model
@@ -254,12 +254,14 @@ def optimise_model(train_param, writer, optimiser, policy_net, target_net):
 #============================================================================
 # Deep Q-Learning Function
 #============================================================================
-def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, target_net, episodes=800, writer=None):
+def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, target_net, 
+                    episodes=800, writer=None, memory=memory, greedy=False):
 
     # Declare Tracking Variables
-    min_steps = 1000
     global steps_done
     episode_rewards = []
+    episode_avg_steps = []
+    success_rate = 0
 
     # Episode Loop
     for e in range(episodes):
@@ -275,7 +277,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         for s in range(0, max_steps):
             # Perform Epsilon-Greedy Action Selection
-            action = select_action(state, explore_param, policy_net, writer)
+            action = select_action(state, explore_param, policy_net, writer, greedy)
             a = action.item()
 
             # Perform the Action in Environment
@@ -290,10 +292,8 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
             episode_reward += reward
 
             # Preprocess the Observation to Obtain Next State
-            if done or truncated:
-                next_state = None
-            else:
-                next_state = preprocess(obs)
+            episode_over = done or truncated
+            next_state = None if done else preprocess(obs)
 
             # Store Transition in Experience Replay Memory
             memory.push(state, action, next_state, reward )
@@ -310,6 +310,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
                 print(f'Updating target network at step {steps_done}')
                 target_net.load_state_dict(policy_net.state_dict())
 
+            if done: success_rate += 1
             # Log Reward / Episode Length to Tensorboard
             if done or truncated:
                 break
@@ -320,29 +321,28 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         # Epsiode Rewards
         episode_rewards.append(episode_reward)
+        episode_avg_steps.append(episode_steps) 
 
-        # Track the Minimum Steps Taken
-        if (min_steps > episode_steps):
-            min_steps = episode_steps   
+
 
         # Write to Tensorboard upon Completion
         if writer is not None:
             writer.add_scalar('Reward/train', reward, steps_done)
             writer.add_scalar('Steps/train', s, steps_done)
 
-    return np.mean(episode_rewards[-100:]), min_steps
+    return np.mean(episode_rewards[-100:]), success_rate/episodes*100, episode_avg_steps 
 
 #============================================================================
 # Tune Hyperparameters using Optuna
 #============================================================================
 def objective(trial):
     # Tune Model Hyperparameters
-    alpha = trial.suggest_float("alpha", 0.003, 1.0, log=True)
+    alpha = trial.suggest_float("alpha", 1e-5, 3e-3, log=True)
     gamma = trial.suggest_float("gamma", 0.8, 0.99)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
     start_epsilon = trial.suggest_float("start_epsilon", 0.5, 1.0)
-    decay_rate = trial.suggest_float("decay_rate", 1000, 3000)
-    stop_epsilon = trial.suggest_float("stop_epsilon", 0.01, 0.05)
+    decay_rate = trial.suggest_float("decay_rate", 1000, 20000)
+    stop_epsilon = trial.suggest_float("stop_epsilon", 0.05, 0.1)
 
     # Group Parameters
     train_param = [alpha, gamma, batch_size]
@@ -362,6 +362,8 @@ def objective(trial):
         np.random.seed(seed)
         random.seed(seed)
 
+        memory = ReplayMemory(mem_size)
+
         # ---- RESET FRESH NETWORKS PER SEED ----
         # Instantiate the Policy Network and Target Network
         policy_net = DQN(input_size, num_actions, hiddenLayerSize).to(device)
@@ -378,8 +380,11 @@ def objective(trial):
         env = ImgObsWrapper(env) 
 
         # Search the Algorithm
-        mean_reward,_ = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
-                                        target_net, episodes=500, writer=None) 
+        _,_,_ = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
+                                        target_net, episodes=300, writer=None, memory=memory, greedy=False) 
+
+        mean_reward, success_rate, mean_steps = deep_q_learning(env, train_param, explore_param, optimiser, 
+                                                                policy_net, target_net, episodes=20, greedy=True) 
         
         rewards.append(mean_reward)
 
@@ -391,6 +396,9 @@ def objective(trial):
     
     elapsed = time.time() - start_time
     print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    print(f'Success Rate: {success_rate}')
+    print(f'Mean Steps: {mean_steps}')
+    print(f'Mean Rewards: {mean_reward}')
 
     # Return the Average of the Trial Rewards
     return np.mean(rewards)
@@ -438,6 +446,7 @@ def eval_model(env, final_policy_net):
                 break
 
             # Move to the Next State
+            current_obs = next_obs.copy()
             current_state = next_state
 
     print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
@@ -453,7 +462,7 @@ if __name__ == "__main__":
     # Study the Model
     print("Start Hyperparameter Tuning...")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
-    study.optimize(objective, n_trials= 100)
+    study.optimize(objective, n_trials= 50)
     
     # Display the Best Parameters
     print("Best Params:", study.best_params)
@@ -464,7 +473,7 @@ if __name__ == "__main__":
 
     # Log Best Parameters
     train_param = [best["alpha"], best["gamma"], best["batch_size"]]
-    decay_rate = best["decay_rate"] * (3000 / 500)  
+    decay_rate = best["decay_rate"] * (3000 / 300)  
     explore_param = [best["start_epsilon"], best["stop_epsilon"], decay_rate]
 
     # ---- RESET NETWORKS FOR FINAL TRAINING ----
@@ -485,6 +494,8 @@ if __name__ == "__main__":
     # SetUp Tensorboard
     writer = SummaryWriter()
 
+    memory = ReplayMemory(mem_size)
+
     # Start Training
     print('Start training...')
     start_time = time.time()
@@ -492,16 +503,17 @@ if __name__ == "__main__":
     steps_done = 0
 
     # Train the Model
-    total_reward, final_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
-                                     target_net, episodes=3000, writer=writer)
+    mean_reward, success_rate, mean_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
+                                     target_net, episodes=3000, writer=writer, memory=memory, greedy=False)
 
     # Done Training
     print('Done Training...')
     end_time = time.time()
     elapsed = end_time - start_time
     print(f'Training Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
-    print(f'Final Steps Taken: {final_steps}')
-    print(f'Final Reward: {total_reward}')
+    print(f'Mean Steps Taken: {mean_steps}')
+    print(f'Mean Reward: {mean_reward}')
+    print(f'Success Rate: {success_rate}')
 
     
     # Flush Remaining Data
