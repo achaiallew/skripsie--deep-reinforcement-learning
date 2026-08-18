@@ -40,22 +40,24 @@ print(device)
 #============================================================================
 # Extract Object_Idx Info Using Numpy Slicing and Reshaping
 def extractObjectInformation2(observation):
-    (rows, cols, x) = observation.shape
-    tmp = np.reshape(observation, [rows*cols*x, 1], 'F')[0:rows*cols]
-    return np.reshape(tmp, [rows, cols], 'C')
+    return  observation["image"][:, :, 0]
 
-# Normalise the Input Observation: [0,1]
-def normalize(observation, max_value):
-    return np.array(observation)/max_value
-
-# Flatten the [7,7] Matrix into a [1,49] Tensor
-def flatten(observation):
-    return torch.from_numpy(np.array(observation).flatten()).float().unsqueeze(0)
-
-# Combine Preprocessing Functions
+# Preprocessing Function
 def preprocess(observation):
-    objects = extractObjectInformation2(observation)
-    return flatten(normalize(objects, 10.0))
+    # Extract the object-ID image channel directly
+    objects = extractObjectInformation2(observation).astype(np.float32) / 10.0
+
+    # One-hot encode direction:
+    # 0=east, 1=south, 2=west, 3=north
+    direction = np.eye(4, dtype=np.float32)[observation["direction"]]
+
+    # Combine the 49 image values with 4 direction values
+    state = np.concatenate([
+        objects.flatten(),
+        direction
+    ])
+
+    return torch.from_numpy(state).float().unsqueeze(0)
 
 #============================================================================
 # Configuration
@@ -68,7 +70,7 @@ max_steps = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped.max_st
 #============================================================================
 # ---- MODEL HYPERPARAMETERS ----
 num_actions = 3                  # left, right, forward
-input_size = 49                  # size of flattened input state (7x7 matrix of tile IDs)
+input_size = 53                  # size of flattened input state (7x7 matrix of tile IDs)
 steps_done = 0
 
 # # ---- TRAINING HYPERPARAMETERS ----
@@ -89,8 +91,7 @@ target_update = 2000              # no. steps bet. updating target network
 mem_size = 200000                  # no. experiences the memory can keep
 
 # ---- TESTING HYPERPARAMETERS ----
-eval_episodes = 100              # no. episodes to be used for eval
-train = True                      # True to train a model; False to eval prev trained agent
+# eval_episodes = 100              # no. episodes to be used for eval
 filename = 'dqn_trained.pth'
 
 #============================================================================
@@ -175,13 +176,13 @@ class ReplayMemory(object):
     def __len__(self):
         return len(self.memory)
 
-# Instantiate Memory
+# Initalise Experience Replay Memory
 memory = ReplayMemory(mem_size)
 
 #============================================================================
 # Optimise Model
 #============================================================================
-def optimise_model(train_param, writer, optimiser, policy_net, target_net):
+def optimise_model(train_param, writer, optimiser, policy_net, target_net, memory):
 
     # Extract Parameters
     #alpha = train_param[0]
@@ -255,7 +256,7 @@ def optimise_model(train_param, writer, optimiser, policy_net, target_net):
 # Deep Q-Learning Function
 #============================================================================
 def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, target_net, 
-                    episodes=800, writer=None, memory=memory, greedy=False):
+                    episodes=800, writer=None, memory=memory):
 
     # Declare Tracking Variables
     global steps_done
@@ -277,7 +278,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
         for s in range(0, max_steps):
             # Perform Epsilon-Greedy Action Selection
-            action = select_action(state, explore_param, policy_net, writer, greedy)
+            action = select_action(state, explore_param, policy_net, writer, greedy=False)
             a = action.item()
 
             # Perform the Action in Environment
@@ -292,7 +293,6 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
             episode_reward += reward
 
             # Preprocess the Observation to Obtain Next State
-            episode_over = done or truncated
             next_state = None if done else preprocess(obs)
 
             # Store Transition in Experience Replay Memory
@@ -300,7 +300,7 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
 
             # Train Model
             if steps_done % 4 == 0:
-                optimise_model(train_param, writer, optimiser, policy_net, target_net)
+                optimise_model(train_param, writer, optimiser, policy_net, target_net, memory)
 
             # Move to Next State
             state = next_state
@@ -310,8 +310,10 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
                 print(f'Updating target network at step {steps_done}')
                 target_net.load_state_dict(policy_net.state_dict())
 
+            # Increment the Successful Episodes
             if done: success_rate += 1
-            # Log Reward / Episode Length to Tensorboard
+
+            # End Loop if Terminated or Truncated
             if done or truncated:
                 break
 
@@ -330,7 +332,75 @@ def deep_q_learning(env, train_param, explore_param, optimiser, policy_net, targ
             writer.add_scalar('Reward/train', reward, steps_done)
             writer.add_scalar('Steps/train', s, steps_done)
 
-    return np.mean(episode_rewards[-100:]), success_rate/episodes*100, episode_avg_steps 
+    return np.mean(episode_rewards), success_rate/episodes*100, np.mean(episode_avg_steps) 
+
+#============================================================================
+# Evaluate Agent Performance
+#============================================================================
+def eval_model(env, eval_policy_net, eval_episodes=100, print_results=True):
+    # Set Up Eval Counter Variables
+    eval_success = 0.0
+    total_steps = 0.0
+    total_reward = 0.0
+
+    # CHANGED: Remember the previous mode so evaluation does not leave a training
+    # policy network in evaluation mode during Optuna.
+    was_training = eval_policy_net.training
+
+    # Set Policy to Evaluation Mode
+    eval_policy_net.eval()
+
+    # Episode Loop
+    with torch.no_grad():
+        for e in range(eval_episodes):
+            # Initialize the Environment and State
+            current_obs, _ = env.reset()
+            current_state = preprocess(current_obs)
+
+            # Main RL Loop
+            for i in range(0, max_steps):
+                # Select an Action
+                action = select_action(current_state, _, eval_policy_net, writer= None, greedy=True)
+                a = action.item()
+
+                # Take Action
+                next_obs, reward, done, truncated, info = env.step(a)
+
+                # Observe a New State
+                if done or truncated:
+                    next_state = None
+                else:
+                    next_state = preprocess(next_obs)
+
+                # Calculate Reward
+                if done or truncated:
+                    total_reward += reward
+                    total_steps += env.unwrapped.step_count
+
+                    # Tally Evaluation Successes
+                    if done:
+                        eval_success += 1
+
+                    # Display Results
+                    if print_results:
+                        result = "reached goal" if done else "failed"
+                        print(f"Episode {e}: reward={reward:.4f}, "
+                            f"steps={env.unwrapped.step_count}, {result}")
+                        
+                    break
+
+                # Move to the Next State
+                current_obs = next_obs.copy()
+                current_state = next_state
+
+    success_rate = 100 * eval_success / eval_episodes
+    mean_reward = total_reward / eval_episodes
+    mean_steps = total_steps / eval_episodes
+
+    # CHANGED: Restore the policy network to the mode it used before evaluation.
+    eval_policy_net.train(was_training)
+
+    return mean_reward, success_rate, mean_steps
 
 #============================================================================
 # Tune Hyperparameters using Optuna
@@ -340,27 +410,37 @@ def objective(trial):
     alpha = trial.suggest_float("alpha", 1e-5, 3e-3, log=True)
     gamma = trial.suggest_float("gamma", 0.8, 0.99)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
-    start_epsilon = trial.suggest_float("start_epsilon", 0.5, 1.0)
-    decay_rate = trial.suggest_float("decay_rate", 1000, 20000)
-    stop_epsilon = trial.suggest_float("stop_epsilon", 0.05, 0.1)
+    # CHANGED: Keep the original exponential epsilon decay, start with full
+    # exploration, and let Optuna tune stop epsilon and the decay rate.
+    start_epsilon = 1.0
+    stop_epsilon = trial.suggest_float("stop_epsilon", 0.02, 0.1)
+    decay_rate = trial.suggest_float("decay_rate", 50000, 100000)
 
     # Group Parameters
     train_param = [alpha, gamma, batch_size]
     explore_param = [start_epsilon, stop_epsilon, decay_rate]
 
-    # Declare Empty Rewards Array
-    rewards = []
+    # CHANGED: Store every seed's evaluation results so the displayed values
+    # and Optuna score represent all seeds rather than only the final seed.
+    seed_rewards = []
+    seed_success_rates = []
+    seed_steps = []
     # Start Tuning Time
     start_time = time.time()
 
     global steps_done
 
-    for seed in range(2): 
+    for seed in range(3): 
         # Reset Steps Done
         steps_done = 0 
 
         np.random.seed(seed)
         random.seed(seed)
+        # CHANGED: Seed PyTorch as well so each trial uses the same three
+        # reproducible network initialisations.
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         memory = ReplayMemory(mem_size)
 
@@ -377,81 +457,172 @@ def objective(trial):
 
         # Make the Gym Environment
         env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-        env = ImgObsWrapper(env) 
+
+        # CHANGED: Seed the environment for reproducible comparisons between trials.
+        env.reset(seed=seed)
 
         # Search the Algorithm
         _,_,_ = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
-                                        target_net, episodes=300, writer=None, memory=memory, greedy=False) 
-
-        mean_reward, success_rate, mean_steps = deep_q_learning(env, train_param, explore_param, optimiser, 
-                                                                policy_net, target_net, episodes=20, greedy=True) 
+                                        target_net, episodes=500, writer=None, memory=memory) 
+        # Evaluate Policy
+        mean_reward, success_rate, mean_steps = eval_model(env, policy_net, eval_episodes=20, print_results=False) 
         
-        rewards.append(mean_reward)
+        # CHANGED: Save the results from this seed for aggregate reporting.
+        seed_rewards.append(mean_reward)
+        seed_success_rates.append(success_rate)
+        seed_steps.append(mean_steps)
 
-        trial.report(np.mean(rewards), seed)
+        # CHANGED: Weight reward by success rate so trials that work reliably
+        # across all seeds rank above trials that only work for one or two seeds.
+        partial_mean_reward = np.mean(seed_rewards)
+        partial_mean_success = np.mean(seed_success_rates) / 100.0
+        partial_score = partial_mean_reward * partial_mean_success
+        trial.report(partial_score, seed)
         if trial.should_prune():
             raise optuna.TrialPruned()
         env.close()
 
-    
+    # CHANGED: Calculate aggregate trial results across all three seeds.
+    overall_mean_reward = np.mean(seed_rewards)
+    overall_success_rate = np.mean(seed_success_rates)
+    overall_mean_steps = np.mean(seed_steps)
+    trial_score = overall_mean_reward * (overall_success_rate / 100.0)
+
     elapsed = time.time() - start_time
     print(f'Trial Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
-    print(f'Success Rate: {success_rate}')
-    print(f'Mean Steps: {mean_steps}')
-    print(f'Mean Rewards: {mean_reward}')
+    # CHANGED: Print each seed and the aggregates instead of only the last seed.
+    print(f'Seed Rewards: {seed_rewards}')
+    print(f'Seed Success Rates: {seed_success_rates}')
+    print(f'Seed Mean Steps: {seed_steps}')
+    print(f'Overall Success Rate: {overall_success_rate:.2f}%')
+    print(f'Overall Mean Steps: {overall_mean_steps:.2f}')
+    print(f'Overall Mean Reward: {overall_mean_reward:.4f}')
+    print(f'Optuna Trial Score: {trial_score:.4f}')
 
-    # Return the Average of the Trial Rewards
-    return np.mean(rewards)
-
+    # CHANGED: Return the success-weighted reward used to rank Optuna trials.
+    return trial_score
 
 #============================================================================
-# Evaluate Agent Performance
+# Validate Best Hyperparameters Using Unseen Seeds
 #============================================================================
-def eval_model(env, final_policy_net):
-    eval_counter = 0.0
-    total_steps = 0.0
-    total_reward = 0.0
+def validate_hyperparameters(best_params, seeds=range(3, 8),
+                             training_episodes=1000,
+                             evaluation_episodes=20):
 
-    for e in range(eval_episodes):
-        # Initialize the Environment and State
-        current_obs, _ = env.reset()
-        current_state = preprocess(current_obs)
+    global steps_done
 
-        # Main RL Loop
-        for i in range(0, max_steps):
-            # Select an Action
-            action = select_action(current_state, _, final_policy_net, writer= None, greedy=True)
-            a = action.item()
+    validation_rewards = []
+    validation_success_rates = []
+    validation_steps = []
 
-            # Take Action
-            next_obs, reward, done, truncated, info = env.step(a)
+    train_param = [
+        best_params["alpha"],
+        best_params["gamma"],
+        best_params["batch_size"]
+    ]
 
-            # Observe a New State
-            if done or truncated:
-                next_state = None
-            else:
-                next_state = preprocess(next_obs)
+    # Use the unscaled decay rate because validation uses the same number
+    # of training episodes as the Optuna trials.
+    explore_param = [
+        1.0,
+        best_params["stop_epsilon"],
+        best_params["decay_rate"]
+    ]
 
-            # Calculate Reward
-            if done or truncated:
-                total_reward += reward
-                total_steps += env.unwrapped.step_count
-                if done:
-                    print('Finished evaluation episode %d with reward %f, %d steps, reaching goal'
-                        % (e, reward, env.unwrapped.step_count))
-                    eval_counter += 1
-                if truncated:
-                    print('Failed evaluation episode %d with reward %f, %d steps'
-                        % (e, reward, env.unwrapped.step_count))
-                break
+    print("Validating best parameters on unseen seeds...")
 
-            # Move to the Next State
-            current_obs = next_obs.copy()
-            current_state = next_state
+    for seed in seeds:
+        # Seed all random-number generators
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
 
-    print('Completion rate %.2f with average reward %0.4f and average steps %0.2f'
-        % (eval_counter/eval_episodes, total_reward/eval_episodes, total_steps/eval_episodes))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
+        steps_done = 0
+
+        # Create fresh replay memory
+        validation_memory = ReplayMemory(mem_size)
+
+        # Create fresh networks
+        validation_policy_net = DQN(
+            input_size,
+            num_actions,
+            hiddenLayerSize
+        ).to(device)
+
+        validation_target_net = DQN(
+            input_size,
+            num_actions,
+            hiddenLayerSize
+        ).to(device)
+
+        validation_target_net.load_state_dict(
+            validation_policy_net.state_dict()
+        )
+        validation_target_net.eval()
+
+        # Create a fresh optimiser
+        validation_optimiser = optim.Adam(
+            validation_policy_net.parameters(),
+            lr=best_params["alpha"]
+        )
+
+        # Direction must remain in the observation
+        validation_env = gym.make(
+            "MiniGrid-Empty-8x8-v0",
+            render_mode=None
+        ).unwrapped
+
+        validation_env.reset(seed=seed)
+
+        # Train from scratch
+        deep_q_learning(
+            validation_env,
+            train_param,
+            explore_param,
+            validation_optimiser,
+            validation_policy_net,
+            validation_target_net,
+            episodes=training_episodes,
+            writer=None,
+            memory=validation_memory
+        )
+
+        # Evaluate the trained policy
+        mean_reward, success_rate, mean_steps = eval_model(
+            validation_env,
+            validation_policy_net,
+            eval_episodes=evaluation_episodes,
+            print_results=False
+        )
+
+        validation_rewards.append(mean_reward)
+        validation_success_rates.append(success_rate)
+        validation_steps.append(mean_steps)
+
+        print(
+            f"Validation seed {seed}: "
+            f"reward={mean_reward:.4f}, "
+            f"success={success_rate:.2f}%, "
+            f"steps={mean_steps:.2f}"
+        )
+
+        validation_env.close()
+
+    overall_reward = np.mean(validation_rewards)
+    overall_success_rate = np.mean(validation_success_rates)
+    overall_steps = np.mean(validation_steps)
+
+    print(f"Validation Rewards: {validation_rewards}")
+    print(f"Validation Success Rates: {validation_success_rates}")
+    print(f"Validation Mean Steps: {validation_steps}")
+    print(f"Overall Validation Reward: {overall_reward:.4f}")
+    print(f"Overall Validation Success Rate: {overall_success_rate:.2f}%")
+    print(f"Overall Validation Steps: {overall_steps:.2f}")
+
+    return overall_reward, overall_success_rate, overall_steps
 
 
 #============================================================================
@@ -462,6 +633,7 @@ if __name__ == "__main__":
     # Study the Model
     print("Start Hyperparameter Tuning...")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    # CHANGED: Increase the Optuna study to 100 trials.
     study.optimize(objective, n_trials= 50)
     
     # Display the Best Parameters
@@ -473,8 +645,19 @@ if __name__ == "__main__":
 
     # Log Best Parameters
     train_param = [best["alpha"], best["gamma"], best["batch_size"]]
-    decay_rate = best["decay_rate"] * (3000 / 300)  
-    explore_param = [best["start_epsilon"], best["stop_epsilon"], decay_rate]
+
+    validation_reward, validation_success, validation_steps = (
+        validate_hyperparameters(
+            best_params=best,
+            seeds=range(3, 8),
+            training_episodes=1000,
+            evaluation_episodes=20
+        )
+    )
+
+    # final-training episodes, while keeping start epsilon fixed at 1.0.
+    decay_rate = best["decay_rate"] * (3000 / 500)
+    explore_param = [1.0, best["stop_epsilon"], decay_rate]
 
     # ---- RESET NETWORKS FOR FINAL TRAINING ----
     # Instantiate the Policy Network and Target Network
@@ -489,7 +672,6 @@ if __name__ == "__main__":
 
     # Gym Environment
     env = gym.make('MiniGrid-Empty-8x8-v0', render_mode=None).unwrapped
-    env = ImgObsWrapper(env)
         
     # SetUp Tensorboard
     writer = SummaryWriter()
@@ -504,7 +686,7 @@ if __name__ == "__main__":
 
     # Train the Model
     mean_reward, success_rate, mean_steps = deep_q_learning(env, train_param, explore_param, optimiser, policy_net, 
-                                     target_net, episodes=3000, writer=writer, memory=memory, greedy=False)
+                                     target_net, episodes=3000, writer=writer, memory=memory)
 
     # Done Training
     print('Done Training...')
@@ -520,7 +702,6 @@ if __name__ == "__main__":
     writer.flush()
     writer.close()
 
-
     # Save the Trained Model
     torch.save(policy_net.state_dict(), filename)
     
@@ -534,9 +715,19 @@ if __name__ == "__main__":
 
     # Evaluate Model Performance
     print('Starting Evaluation...')
+    start_time = time.time()
     final_policy_net.eval()
-    eval_model(env, final_policy_net)
+    mean_reward, success_rate, mean_steps = eval_model(env, final_policy_net, eval_episodes=100, print_results=True)
 
+    # Done Final Evaluation
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f'Evaluation Done In {elapsed:.2f} s ({elapsed/60:.2f} min)')
+    print(f"Completion Rate: {success_rate:.2f}% | "
+          f"Average Reward: {mean_reward:.4f} | "
+          f"Average Steps: {mean_steps:.2f}"
+    )
+    
     # Close the Environment
     env.close()
 
